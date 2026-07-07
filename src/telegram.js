@@ -1,6 +1,7 @@
 const config = require('./config');
 const { telegram } = config;
 const logger = require('./logger');
+const { estimateMcapUsd } = require('./mcap');
 
 async function sendTelegramMessage(text) {
   if (!telegram.botToken || !telegram.chatId) {
@@ -41,7 +42,7 @@ function formatUSD(n) {
 function formatAlert({ rec, result }) {
   const { score, buyRatio, uniqueBuyers, minutesToThreshold } = result;
   const pct = rec.latestBondingPct.toFixed(1);
-  const mcapEstimate = (rec.latestBondingPct / 100) * config.curve.GRADUATION_MCAP_USD_APPROX;
+  const mcapEstimate = estimateMcapUsd(rec.latestBondingPct);
   const solscan = `https://solscan.io/token/${rec.mint}`;
   const pumpfun = `https://pump.fun/coin/${rec.mint}`;
 
