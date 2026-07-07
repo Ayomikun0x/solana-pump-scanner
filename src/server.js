@@ -6,6 +6,8 @@ const { parseWebhookBody } = require('./pumpEventParser');
 const { scoreToken } = require('./scorer');
 const { sendTelegramMessage, formatAlert } = require('./telegram');
 const { fetchCreatorFromDAS } = require('./dasLookup');
+const { estimateMcapUsd } = require('./mcap');
+const paperTrader = require('./paperTrader');
 
 const app = express();
 
@@ -14,6 +16,61 @@ app.use(express.json({ limit: '5mb' }));
 
 app.get('/health', (req, res) => {
   res.json({ ok: true, ...tokenState.stats() });
+});
+
+app.get('/winrate', (req, res) => {
+  const stats = paperTrader.winRateStats();
+  const positions = paperTrader.getAllPositions();
+
+  const rows = positions
+    .map((p) => {
+      const statusColor = p.status === 'win' ? '#2ecc71' : p.status === 'loss' ? '#e74c3c' : '#f39c12';
+      const multiple = p.status === 'open' ? p.lastMultiple : p.finalMultiple;
+      const multipleText = multiple != null ? `${multiple.toFixed(2)}x` : '—';
+      return `<tr>
+        <td><code>${p.mint.slice(0, 8)}...</code></td>
+        <td>${new Date(p.entryTime).toLocaleString()}</td>
+        <td>${p.entryScore}</td>
+        <td style="color:${statusColor};font-weight:bold">${p.status.toUpperCase()}</td>
+        <td>${multipleText}</td>
+        <td>${p.maxMultiple.toFixed(2)}x</td>
+      </tr>`;
+    })
+    .join('\n');
+
+  const html = `<!DOCTYPE html>
+  <html>
+  <head>
+    <title>Win Rate</title>
+    <style>
+      body { font-family: -apple-system, sans-serif; background: #0d1117; color: #e6edf3; padding: 24px; }
+      h1 { font-size: 20px; }
+      .stat-box { display: inline-block; background: #161b22; border-radius: 8px; padding: 16px 20px; margin-right: 12px; margin-bottom: 20px; }
+      .stat-box .num { font-size: 28px; font-weight: bold; }
+      .stat-box .label { font-size: 13px; color: #8b949e; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #21262d; font-size: 14px; }
+      th { color: #8b949e; font-weight: normal; }
+      code { color: #79c0ff; }
+    </style>
+  </head>
+  <body>
+    <h1>Paper trading results</h1>
+    <div>
+      <div class="stat-box"><div class="num">${stats.winRatePct != null ? stats.winRatePct.toFixed(0) + '%' : '—'}</div><div class="label">Win rate</div></div>
+      <div class="stat-box"><div class="num">${stats.wins}</div><div class="label">Wins</div></div>
+      <div class="stat-box"><div class="num">${stats.losses}</div><div class="label">Losses</div></div>
+      <div class="stat-box"><div class="num">${stats.open}</div><div class="label">Still open</div></div>
+    </div>
+    <table>
+      <tr><th>Mint</th><th>Alerted at</th><th>Score</th><th>Status</th><th>Result</th><th>Peak</th></tr>
+      ${rows || '<tr><td colspan="6">No alerts yet.</td></tr>'}
+    </table>
+    <p style="color:#8b949e;font-size:12px;margin-top:20px">Refresh this page anytime to see the latest. "Win" = hit ${config.paperTrading.exitTargetMultiple}x within ${config.paperTrading.maxHoldHours}h of the alert. This is simulated -- no real trades were placed.</p>
+  </body>
+  </html>`;
+
+  res.send(html);
 });
 
 // Tracks transaction signatures we've already processed, so a Helius
@@ -89,12 +146,37 @@ async function handleTrade(trade) {
   if (result.score >= config.thresholds.minScoreToAlert) {
     const message = formatAlert({ rec, result });
     await sendTelegramMessage(message);
+
+    // Start paper-tracking this one so we can measure win rate over time.
+    paperTrader.openPosition({
+      mint: rec.mint,
+      entryScore: result.score,
+      entryMcapUsd: estimateMcapUsd(rec.latestBondingPct),
+    });
   } else {
     logger.info(`${rec.mint} did not meet min score (${config.thresholds.minScoreToAlert}) -- skipped.`);
   }
 }
 
 setInterval(() => tokenState.pruneStale(), 15 * 60 * 1000).unref();
+
+setInterval(() => {
+  paperTrader.checkOpenPositions().catch((err) => logger.error('Error checking open paper positions:', err));
+}, config.paperTrading.checkIntervalMs).unref();
+
+// Daily win-rate digest to Telegram.
+setInterval(() => {
+  const stats = paperTrader.winRateStats();
+  if (stats.closed === 0) return; // nothing resolved yet, skip the noise
+  const winRateText = stats.winRatePct != null ? `${stats.winRatePct.toFixed(0)}%` : 'n/a';
+  const message = [
+    `📊 <b>Daily win-rate digest</b>`,
+    ``,
+    `Win rate: <b>${winRateText}</b> (${stats.wins}W / ${stats.losses}L, ${stats.closed} closed)`,
+    `Still tracking: ${stats.open} open positions`,
+  ].join('\n');
+  sendTelegramMessage(message).catch((err) => logger.error('Failed to send daily digest:', err));
+}, 24 * 60 * 60 * 1000).unref();
 
 app.listen(config.port, () => {
   logger.info(`Pump graduation scanner listening on port ${config.port}`);
