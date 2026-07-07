@@ -25,6 +25,12 @@ module.exports = {
     // computing progress from realTokenReserves when you have it (see
     // scorer.js), not from a hardcoded SOL number.
     GRADUATION_SOL_APPROX: 85,
+    // Market cap USD at 100% bonding, used to estimate mcap from bonding %
+    // at alert time. Pump.fun's curve is designed so the ~$69k figure holds
+    // fairly steady; since alerts only fire at 85%+ bonded (close to the
+    // finish line), scaling linearly off this is a reasonable estimate --
+    // not a precise real-time price feed, but close enough for a quick read.
+    GRADUATION_MCAP_USD_APPROX: 69000,
   },
 
   thresholds: {
