@@ -16,6 +16,23 @@ app.get('/health', (req, res) => {
   res.json({ ok: true, ...tokenState.stats() });
 });
 
+// Tracks transaction signatures we've already processed, so a Helius
+// redelivery of the same event (their docs warn this can happen) doesn't
+// get counted or alerted on twice. Simple bounded FIFO -- no need for
+// anything fancier at this volume.
+const processedSignatures = new Set();
+const MAX_SIG_CACHE = 5000;
+function alreadyProcessed(signature) {
+  if (!signature) return false;
+  if (processedSignatures.has(signature)) return true;
+  processedSignatures.add(signature);
+  if (processedSignatures.size > MAX_SIG_CACHE) {
+    const oldest = processedSignatures.values().next().value;
+    processedSignatures.delete(oldest);
+  }
+  return false;
+}
+
 app.post('/webhook/pump', async (req, res) => {
   // Verify the shared secret you set in the Helius webhook config's
   // "Auth Header" field. Helius echoes it back as the Authorization header.
@@ -33,6 +50,10 @@ app.post('/webhook/pump', async (req, res) => {
   try {
     const trades = parseWebhookBody(req.body);
     for (const trade of trades) {
+      if (alreadyProcessed(trade.signature)) {
+        logger.debug('Skipping already-processed signature', trade.signature);
+        continue;
+      }
       await handleTrade(trade);
     }
   } catch (err) {
@@ -45,6 +66,12 @@ async function handleTrade(trade) {
 
   if (rec.alerted) return; // already alerted for this mint, don't spam
   if (rec.latestBondingPct < config.thresholds.alertBondingPct) return;
+
+  // Claim this token IMMEDIATELY, before any awaits. Multiple trades for
+  // the same mint can arrive within milliseconds of each other right as it
+  // crosses threshold -- without claiming synchronously here, two of them
+  // could both see rec.alerted === false and both go on to send an alert.
+  tokenState.markAlerted(rec.mint);
 
   logger.info(`${rec.mint} crossed ${config.thresholds.alertBondingPct}% bonding -- scoring...`);
 
@@ -62,12 +89,7 @@ async function handleTrade(trade) {
   if (result.score >= config.thresholds.minScoreToAlert) {
     const message = formatAlert({ rec, result });
     await sendTelegramMessage(message);
-    tokenState.markAlerted(rec.mint);
   } else {
-    // Mark alerted anyway so we don't re-score this mint every single trade
-    // once it's past threshold and already failed -- but log it so you can
-    // review misses later and re-tune weights.
-    tokenState.markAlerted(rec.mint);
     logger.info(`${rec.mint} did not meet min score (${config.thresholds.minScoreToAlert}) -- skipped.`);
   }
 }
