@@ -11,7 +11,9 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "@solana/web3.js": "^1.95.3",
+    "@solana/spl-token": "^0.4.9"
   },
   "engines": {
     "node": ">=18.0.0"
