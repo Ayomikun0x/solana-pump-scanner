@@ -1,0 +1,19 @@
+{
+  "name": "solana-pump-graduation-scanner",
+  "version": "1.0.0",
+  "description": "Helius webhook -> pump.fun graduation scanner -> Telegram alerts",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "logtest": "node src/tools/replayLog.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
