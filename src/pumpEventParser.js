@@ -1,10 +1,7 @@
-const { PublicKey } = require('@solana/web3.js');
-const { getAssociatedTokenAddressSync } = require('@solana/spl-token');
 const { PUMP_PROGRAM_ID, curve } = require('./config');
 const logger = require('./logger');
 
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
-const PUMP_PROGRAM_PUBKEY = new PublicKey(PUMP_PROGRAM_ID);
 
 /**
  * NOTE ON APPROACH
@@ -16,26 +13,14 @@ const PUMP_PROGRAM_PUBKEY = new PublicKey(PUMP_PROGRAM_ID);
  * in the program logs. Balance deltas are stable across program upgrades and
  * don't require guessing struct field order/discriminators.
  *
- * IMPORTANT: identifying which token-balance entry belongs to the bonding
- * curve (as opposed to the trader, or a fee/creator-reward account) is done
- * by computing the curve's associated token account address directly --
- * it's a deterministic PDA derived from the mint -- rather than by
- * elimination ("whichever entry isn't the trader's"). The elimination
- * approach can grab the wrong account when a tx has more than two
- * token-balance entries for the mint, which silently produces a wrong
- * bonding % (this was an actual bug caught in testing: a token still early
- * in its curve got miscalculated as almost graduated).
+ * A pump.fun buy/sell instruction moves tokens between exactly two token
+ * accounts for the mint: the trader's ATA and the bonding curve's ATA. We
+ * identify the curve side as "whichever entry isn't the trader's." If a
+ * transaction ever has MORE than two balance entries for the mint (some
+ * unexpected extra account), we deliberately skip it rather than guess which
+ * one is the curve -- an earlier version of this code guessed in that case,
+ * which risked misreading bonding % on ambiguous transactions.
  */
-
-// pump.fun's bonding curve PDA is derived deterministically per mint.
-function deriveBondingCurveAta(mintPubkey) {
-  const [bondingCurvePda] = PublicKey.findProgramAddressSync(
-    [Buffer.from('bonding-curve'), mintPubkey.toBuffer()],
-    PUMP_PROGRAM_PUBKEY
-  );
-  const ata = getAssociatedTokenAddressSync(mintPubkey, bondingCurvePda, true);
-  return { bondingCurvePda, ata };
-}
 
 function normalizeAccountKeys(message) {
   if (!message || !message.accountKeys) return [];
@@ -92,41 +77,24 @@ function parsePumpTrade(rawTx) {
     const { pre, post } = findMintBalanceEntries(meta.preTokenBalances, meta.postTokenBalances, mint);
     if (post.length === 0) return null;
 
-    // --- Trader side: match by owner, as before -- this side isn't ambiguous.
+    // Safety check: a normal buy/sell has exactly two balance entries for
+    // this mint (trader + curve). If there are more, something unexpected
+    // is going on (an extra account we don't recognize) -- skip rather
+    // than risk misidentifying which one is the curve.
+    if (pre.length > 2 || post.length > 2) {
+      logger.debug(`Skipping tx with ${post.length} balance entries for mint ${mint} -- ambiguous, not the usual 2-party swap.`);
+      return null;
+    }
+
     const traderEntry = {
       pre: pre.find((b) => b.owner === trader),
       post: post.find((b) => b.owner === trader),
     };
-
-    // --- Curve side: match by exact derived account address, not elimination.
-    let mintPubkey;
-    try {
-      mintPubkey = new PublicKey(mint);
-    } catch {
-      return null;
-    }
-    const { ata: bondingCurveAta } = deriveBondingCurveAta(mintPubkey);
-    const bondingCurveAtaStr = bondingCurveAta.toBase58();
-
-    const findByAccountIndex = (entries) =>
-      entries.find((b) => accountKeys[b.accountIndex] === bondingCurveAtaStr);
-
-    let curveEntry = {
-      pre: findByAccountIndex(pre),
-      post: findByAccountIndex(post),
+    const curveEntry = {
+      pre: pre.find((b) => b.owner !== trader),
+      post: post.find((b) => b.owner !== trader),
     };
-
-    if (!curveEntry.post) {
-      // Fallback to the old elimination heuristic, but log it -- if this
-      // fires often, the PDA derivation assumption needs re-checking
-      // against a real captured payload.
-      logger.warn(`Could not find bonding curve ATA by exact match for mint ${mint} -- falling back to heuristic.`);
-      curveEntry = {
-        pre: pre.find((b) => b.owner !== trader),
-        post: post.find((b) => b.owner !== trader),
-      };
-    }
-    if (!curveEntry.post) return null; // still nothing -- skip rather than guess wrong
+    if (!curveEntry.post) return null; // can't find the curve side, skip
 
     const traderPreAmt = uiAmount(traderEntry.pre);
     const traderPostAmt = uiAmount(traderEntry.post);
