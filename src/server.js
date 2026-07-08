@@ -14,8 +14,19 @@ const app = express();
 // Helius payloads are small, but keep a generous-but-bounded limit.
 app.use(express.json({ limit: '5mb' }));
 
+// Diagnostic counters -- lets us see at a glance whether events are
+// arriving and whether they're turning into recognized trades, instead of
+// guessing blind next time something seems off.
+const diagnostics = {
+  webhookCallsReceived: 0,
+  rawTxsInLastCall: 0,
+  tradesParsedTotal: 0,
+  tradesSkippedTotal: 0,
+  lastWebhookAt: null,
+};
+
 app.get('/health', (req, res) => {
-  res.json({ ok: true, ...tokenState.stats() });
+  res.json({ ok: true, ...tokenState.stats(), diagnostics });
 });
 
 app.get('/winrate', (req, res) => {
@@ -104,8 +115,15 @@ app.post('/webhook/pump', async (req, res) => {
   // Ack immediately -- Helius wants a 200 within ~1s, do the work after.
   res.status(200).json({ received: true });
 
+  diagnostics.webhookCallsReceived += 1;
+  diagnostics.lastWebhookAt = new Date().toISOString();
+  const rawCount = Array.isArray(req.body) ? req.body.length : 1;
+  diagnostics.rawTxsInLastCall = rawCount;
+
   try {
     const trades = parseWebhookBody(req.body);
+    diagnostics.tradesParsedTotal += trades.length;
+    diagnostics.tradesSkippedTotal += rawCount - trades.length;
     for (const trade of trades) {
       if (alreadyProcessed(trade.signature)) {
         logger.debug('Skipping already-processed signature', trade.signature);
