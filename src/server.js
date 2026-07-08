@@ -19,6 +19,7 @@ app.use(express.json({ limit: '5mb' }));
 // guessing blind next time something seems off.
 const diagnostics = {
   webhookCallsReceived: 0,
+  unauthorizedCallsReceived: 0,
   rawTxsInLastCall: 0,
   tradesParsedTotal: 0,
   tradesSkippedTotal: 0,
@@ -107,6 +108,7 @@ app.post('/webhook/pump', async (req, res) => {
   if (config.webhookAuthSecret) {
     const auth = req.get('Authorization');
     if (auth !== config.webhookAuthSecret) {
+      diagnostics.unauthorizedCallsReceived += 1;
       logger.warn('Rejected webhook call with bad/missing auth header.');
       return res.status(401).json({ error: 'unauthorized' });
     }
