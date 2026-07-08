@@ -13,13 +13,16 @@ const WSOL_MINT = 'So11111111111111111111111111111111111111112';
  * in the program logs. Balance deltas are stable across program upgrades and
  * don't require guessing struct field order/discriminators.
  *
- * A pump.fun buy/sell instruction moves tokens between exactly two token
- * accounts for the mint: the trader's ATA and the bonding curve's ATA. We
- * identify the curve side as "whichever entry isn't the trader's." If a
- * transaction ever has MORE than two balance entries for the mint (some
- * unexpected extra account), we deliberately skip it rather than guess which
- * one is the curve -- an earlier version of this code guessed in that case,
- * which risked misreading bonding % on ambiguous transactions.
+ * A pump.fun buy/sell instruction moves tokens between the trader's ATA
+ * and the bonding curve's ATA. Some transactions may include an additional
+ * small token-balance entry (e.g. a creator-fee account) beyond just those
+ * two. We identify the curve side as "whichever non-trader entry holds the
+ * largest balance" -- the curve holds tens/hundreds of millions of tokens,
+ * so it can't be confused with a comparatively tiny fee-account balance.
+ * (An earlier version of this code rejected any transaction with more than
+ * two balance entries outright, which -- if pump.fun's current instructions
+ * always include an extra account -- would silently drop every single
+ * trade. This version handles that case instead of bailing on it.)
  */
 
 function normalizeAccountKeys(message) {
@@ -77,24 +80,19 @@ function parsePumpTrade(rawTx) {
     const { pre, post } = findMintBalanceEntries(meta.preTokenBalances, meta.postTokenBalances, mint);
     if (post.length === 0) return null;
 
-    // Safety check: a normal buy/sell has exactly two balance entries for
-    // this mint (trader + curve). If there are more, something unexpected
-    // is going on (an extra account we don't recognize) -- skip rather
-    // than risk misidentifying which one is the curve.
-    if (pre.length > 2 || post.length > 2) {
-      logger.debug(`Skipping tx with ${post.length} balance entries for mint ${mint} -- ambiguous, not the usual 2-party swap.`);
-      return null;
-    }
-
     const traderEntry = {
       pre: pre.find((b) => b.owner === trader),
       post: post.find((b) => b.owner === trader),
     };
-    const curveEntry = {
-      pre: pre.find((b) => b.owner !== trader),
-      post: post.find((b) => b.owner !== trader),
-    };
-    if (!curveEntry.post) return null; // can't find the curve side, skip
+
+    // Curve side: among all non-trader entries, take the one with the
+    // largest balance -- see note above on why this is robust even if
+    // extra fee/reward accounts are present.
+    const nonTraderPost = post.filter((b) => b.owner !== trader);
+    if (nonTraderPost.length === 0) return null;
+    const curvePostEntry = nonTraderPost.reduce((a, b) => (uiAmount(b) > uiAmount(a) ? b : a));
+    const curvePreEntry = pre.find((b) => b.owner === curvePostEntry.owner);
+    const curveEntry = { pre: curvePreEntry, post: curvePostEntry };
 
     const traderPreAmt = uiAmount(traderEntry.pre);
     const traderPostAmt = uiAmount(traderEntry.post);
